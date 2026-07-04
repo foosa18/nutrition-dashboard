@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.env.local
+.env.*.local
+.vercel
+.DS_Store
+*.pem
+components/*.bak
+# root-level artifact drops are working files, not source
+/NutritionDashboard.jsx
