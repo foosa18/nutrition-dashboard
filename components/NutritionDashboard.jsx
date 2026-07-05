@@ -88,7 +88,7 @@ const GROCERY_LOCAL = [
 async function callClaude(content) {
   const res = await fetch("/api/analyze", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1500,
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1500,
       messages: [{ role: "user", content }], tools: [{ type: "web_search_20250305", name: "web_search" }] }),
   });
   const data = await res.json();
@@ -510,7 +510,7 @@ function GroceryPlan() {
     try {
       const res = await fetch("/api/analyze", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 80,
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 80,
           messages: [{ role: "user", content: `Is "${q}" a real city findable on Google Maps? Reply ONLY compact JSON: {"valid":true|false,"city":"Canonical City, Region/Country"}` }] }),
       });
       const data = await res.json();
