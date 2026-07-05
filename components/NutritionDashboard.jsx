@@ -102,13 +102,6 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: PAPER, color: INK, fontFamily: "Work Sans, system-ui, sans-serif",
       backgroundImage: "radial-gradient(circle at 1px 1px, rgba(31,27,22,.04) 1px, transparent 0)", backgroundSize: "22px 22px" }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Work+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap');
-        input,select,button{font-family:inherit;font-size:14px}
-        .num{font-family:'JetBrains Mono',monospace}
-        .fade{animation:fu .45s ease both}@keyframes fu{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-        .cell{background:#fff;border:1px solid ${LINE};border-radius:7px;padding:7px 8px;width:100%;color:${INK};box-sizing:border-box}
-        .btn{cursor:pointer;border:none;border-radius:8px;padding:9px 14px;font-weight:600}
-        ::selection{background:${MUSTARD}}`}</style>
       <div style={{ maxWidth: 940, margin: "0 auto", padding: "30px 18px 90px" }}>
         <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, letterSpacing: 2, color: TERRA, textTransform: "uppercase" }}>Nutrition workbench</div>
         <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontSize: 38, margin: "4px 0 16px", lineHeight: 1.05 }}>The Plate Lab</h1>
