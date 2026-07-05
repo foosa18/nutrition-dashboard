@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useCallback } from "react";
-import { BarChart, Bar, XAxis, YAxis, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Cell, ResponsiveContainer, Tooltip, ComposedChart, Line, CartesianGrid } from "recharts";
 
 /* ============ shared constants ============ */
 const CUP_CUIN = 14.4375;
@@ -95,30 +95,83 @@ async function callClaude(content) {
   return (data.content || []).map((c) => (c.type === "text" ? c.text : "")).join("\n");
 }
 const grabJSON = (t) => { const s = t.indexOf("["), e = t.lastIndexOf("]"); if (s < 0 || e < 0) throw new Error("No JSON"); return JSON.parse(t.slice(s, e + 1)); };
+const grabObj  = (t) => { const s = t.indexOf("{"), e = t.lastIndexOf("}"); if (s < 0 || e < 0) throw new Error("No JSON"); return JSON.parse(t.slice(s, e + 1)); };
+
+/* ── food score: calibrated 0-10 rubric ──
+   2 calorie · 2 protein density · 2 fiber density · 3 quality · 1 fat-band
+   • density = grams per 100 kcal (so a bigger portion of the wrong food can't inflate it)
+   • calorie fit is ASYMMETRIC: no penalty for eating up to 30% under target (a light meal
+     is a choice); penalty ramps from -30% to 0 pts at -80%. Overeating penalizes from 0 to
+     +50%.
+   • hard cap: if actual kcal > 175% of target, total is capped at 2 (blowout guard) */
+function computeFoodScore({ actualKcal, targetKcal, actualProtein, targetProtein, actualFiber, targetFiber, actualFat, targetFat, quality }) {
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const ak = actualKcal || 0.001, tk = targetKcal || 0.001;
+  const rel = (ak - tk) / tk; // + = over, - = under
+  let calFrac;
+  if (rel >= 0) calFrac = clamp(1 - rel / 0.5, 0, 1);                 // over: 0 at +50%
+  else if (rel >= -0.30) calFrac = 1;                                  // grace: free down to -30%
+  else calFrac = clamp(1 - (-rel - 0.30) / 0.5, 0, 1);                // under: 0 at -80%
+  const calScore = 2 * calFrac;
+
+  const dens = (g, kcal) => g / (kcal / 100);
+  const proteinScore = 2 * clamp(dens(targetProtein, tk) > 0 ? dens(actualProtein, ak) / dens(targetProtein, tk) : 0, 0, 1);
+  const fiberScore   = 2 * clamp(dens(targetFiber, tk)   > 0 ? dens(actualFiber, ak)   / dens(targetFiber, tk)   : 0, 0, 1);
+
+  const gT = dens(targetFat, tk), fatDev = gT > 0 ? Math.abs(dens(actualFat, ak) - gT) / gT : 1;
+  const fatScore = 1 * clamp(1 - fatDev / 0.75, 0, 1);
+
+  const qScore = 3 * clamp((quality == null ? 5 : quality) / 10, 0, 1); // AI whole-food judgment 0-10
+
+  let total = calScore + proteinScore + fiberScore + fatScore + qScore;
+  const capped = ak > tk * 1.75;
+  if (capped) total = Math.min(total, 2);
+  return { total: Math.round(clamp(total, 0, 10)), calScore, proteinScore, fiberScore, fatScore, qScore, capped };
+}
+
+/* ── seed progress log (demo data — replace via manual entries) ── */
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+const SEED_LOG = Array.from({ length: 42 }, (_, i) => {
+  const n = 41 - i;
+  const w = 207 - n * 0.11 + Math.sin(n / 4) * 0.6;
+  const score = Math.round(5 + Math.sin(n / 3) * 2.5 + (n % 7 === 0 ? -2 : 0));
+  const events = n % 14 === 0 ? "Travel day — ate out" : n % 9 === 0 ? "Bike ride 20mi" : n === 0 ? "Started plan" : "";
+  return { id: uid(), date: daysAgo(n), weightLbs: Math.round(w * 10) / 10, foodScore: Math.max(1, Math.min(10, score)), events };
+});
 
 /* ============ root with tabs ============ */
 export default function App() {
   const [tab, setTab] = useState("plate");
+  const [log, setLog] = useState(SEED_LOG);
+
+  const logToday = (patch) => setLog((prev) => {
+    const date = patch.date || todayISO();
+    const idx = prev.findIndex((e) => e.date === date);
+    if (idx === -1) return [...prev, { id: uid(), date, weightLbs: null, foodScore: null, events: "", ...patch }].sort((a, b) => a.date.localeCompare(b.date));
+    const next = [...prev]; next[idx] = { ...next[idx], ...patch }; return next;
+  });
+
   return (
     <div style={{ minHeight: "100vh", background: PAPER, color: INK, fontFamily: "Work Sans, system-ui, sans-serif",
       backgroundImage: "radial-gradient(circle at 1px 1px, rgba(31,27,22,.04) 1px, transparent 0)", backgroundSize: "22px 22px" }}>
       <div style={{ maxWidth: 940, margin: "0 auto", padding: "30px 18px 90px" }}>
         <div style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, letterSpacing: 2, color: TERRA, textTransform: "uppercase" }}>Nutrition workbench</div>
         <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontSize: 38, margin: "4px 0 16px", lineHeight: 1.05 }}>The Plate Lab</h1>
-        <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-          {[["plate", "🍽 Plate Lab"], ["fridge", "🧊 Fridge & Shop"], ["grocery", "🛒 Grocery Plan"]].map(([k, l]) => (
+        <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+          {[["plate", "🍽 Plate Lab"], ["fridge", "🧊 Fridge & Shop"], ["grocery", "🛒 Grocery Plan"], ["progress", "📈 Progress"]].map(([k, l]) => (
             <button key={k} className="btn" onClick={() => setTab(k)}
               style={{ background: tab === k ? INK : "transparent", color: tab === k ? PAPER : INK, border: `1px solid ${tab === k ? INK : LINE}` }}>{l}</button>
           ))}
         </div>
-        {tab === "plate" ? <PlateLab /> : tab === "fridge" ? <FridgeShop /> : <GroceryPlan />}
+        {tab === "plate" ? <PlateLab onLogScore={logToday} /> : tab === "fridge" ? <FridgeShop /> : tab === "grocery" ? <GroceryPlan /> : <ProgressTab log={log} onLog={logToday} />}
       </div>
     </div>
   );
 }
 
 /* ============ TAB 1: plate ============ */
-function PlateLab() {
+function PlateLab({ onLogScore }) {
   const [img, setImg]           = useState(null);
   const [mode, setMode]         = useState(null); // 'crop'|'ref'|'lasso'|'plate'
   const [refPts, setRefPts]     = useState([]);
@@ -133,6 +186,9 @@ function PlateLab() {
   const [manualUnit, setManualUnit] = useState("in");
   const [packing, setPacking]   = useState(0.6);
   const [foods, setFoods]       = useState([]);
+  const [target, setTarget]     = useState({ kcal: 600, protein: 30, fiber: 8, fat: 20, carbs: 60 });
+  const [actualMacro, setActualMacro] = useState(null); // {protein,fiber,fat,carbs}
+  const [logged, setLogged]     = useState(false);
   const [busy, setBusy]         = useState(false);
   const [err, setErr]           = useState("");
   const overlayRef = useRef(null);
@@ -164,7 +220,7 @@ function PlateLab() {
     const rd = new FileReader(); rd.onload = () => {
       setImg({ src: rd.result, mime: f.type||"image/jpeg", b64: String(rd.result).split(",")[1] });
       setRefPts([]); setPlatePts([]); setLasso([]); setLassoDone(false);
-      setCropRect(null); setFoods([]); setErr(""); };
+      setCropRect(null); setFoods([]); setActualMacro(null); setLogged(false); setErr(""); };
     rd.readAsDataURL(f); };
 
   // ── mouse handlers ──
@@ -199,18 +255,31 @@ function PlateLab() {
   const resetMeasure = () => { setRefPts([]); setRefVal(""); setPlatePts([]); setLasso([]); setLassoDone(false); setCropRect(null); setManualDia(""); setMode(null); };
 
   // ── detect foods ──
-  const detect = async () => { if (!img) return; setBusy(true); setErr("");
+  const detect = async () => { if (!img) return; setBusy(true); setErr(""); setLogged(false);
     try { const text = await callClaude([{type:"image",source:{type:"base64",media_type:img.mime,data:img.b64}},
-      {type:"text",text:`Identify each distinct food on this plate/bowl. For each return name, coverage_pct (% of visible food, sum ~100), thickness_in (food layer thickness), kcal_per_cup (use web_search if unsure). Return ONLY JSON: [{"name":"","coverage_pct":0,"thickness_in":0,"kcal_per_cup":0}]`}]);
-      setFoods(grabJSON(text).map((f)=>({id:uid(),name:f.name||"Food",coveragePct:Math.round(+f.coverage_pct||0),thicknessIn:+f.thickness_in||0.5,kcalPerCup:Math.round(+f.kcal_per_cup||FOOD_DB[f.name]||150)})));
+      {type:"text",text:`Analyze this plate/bowl photo. Return ONLY JSON (no prose): {"foods":[{"name":"","coverage_pct":0,"thickness_in":0,"kcal_per_cup":0}],"totals":{"protein_g":0,"fiber_g":0,"fat_g":0,"carbs_g":0},"quality":0}. "foods": each distinct food, coverage_pct sums to ~100, thickness_in is food-layer depth, kcal_per_cup use web_search if unsure. "totals": best holistic estimate of total protein/fiber/fat/carbs in grams as actually portioned. "quality": 0-10 whole-food nutrition quality of the WHOLE plate in context (10 = whole, minimally processed, balanced e.g. grilled salmon + vegetables; 7-8 = mostly whole; 4 = refined/processed e.g. a croissant; 2 = ultra-processed / fried / sugary e.g. pizza or soda). Judge the full combination, not the best single item.`}]);
+      const parsed = grabObj(text);
+      setFoods((parsed.foods||[]).map((f)=>({id:uid(),name:f.name||"Food",coveragePct:Math.round(+f.coverage_pct||0),thicknessIn:+f.thickness_in||0.5,kcalPerCup:Math.round(+f.kcal_per_cup||FOOD_DB[f.name]||150)})));
+      const t = parsed.totals||{};
+      setActualMacro({ protein: Math.round(+t.protein_g||0), fiber: Math.round(+t.fiber_g||0), fat: Math.round(+t.fat_g||0), carbs: Math.round(+t.carbs_g||0), quality: parsed.quality==null?5:Math.round(clampQ(+parsed.quality)) });
     } catch(e2){setErr("Detection failed: "+e2.message+". Add manually below.");} finally{setBusy(false);}};
 
+  const clampQ = (v) => Math.max(0, Math.min(10, v||0));
   const upd   = (id,k,v) => setFoods(p=>p.map(f=>f.id===id?{...f,[k]:v}:f));
   const calc  = (f) => { if(!plateAreaIn2) return {kcal:0}; const vol=plateAreaIn2*(f.coveragePct/100)*f.thicknessIn*packing; return {kcal:(vol/CUP_CUIN)*f.kcalPerCup}; };
   const total = foods.reduce((s,f)=>s+calc(f).kcal,0);
   const cov   = foods.reduce((s,f)=>s+(+f.coveragePct||0),0);
   const palette = [TERRA,TEAL,MUSTARD,"#7A8450","#9B5DE5","#8C6239"];
   const chart = foods.map(f=>({name:f.name,kcal:Math.round(calc(f).kcal)}));
+
+  const score = actualMacro ? computeFoodScore({
+    actualKcal: total, targetKcal: +target.kcal,
+    actualProtein: +actualMacro.protein, targetProtein: +target.protein,
+    actualFiber: +actualMacro.fiber, targetFiber: +target.fiber,
+    actualFat: +actualMacro.fat, targetFat: +target.fat,
+    quality: actualMacro.quality,
+  }) : null;
+  const scoreColor = !score ? "#9B9286" : score.total >= 8 ? TEAL : score.total >= 5 ? MUSTARD : TERRA;
 
   // ── tool hint text ──
   const hints = { crop:"Drag to select crop area, then Apply", ref:"Click two ends of a known-length object", lasso:"Draw around the plate rim — release to fit circle", plate:"Click two opposite rim points" };
@@ -337,6 +406,49 @@ function PlateLab() {
               </BarChart></ResponsiveContainer></div>
             <p style={{fontSize:12,color:"#9B9286",margin:"8px 0 0"}}>Estimate only — depth is inferred. Tune thickness & packing to calibrate.</p>
           </Result>)}
+
+        {plateReady && foods.length>0 && (
+          <Card>
+            <Head n={4} done={!!score}>🎯 Meal target & food score</Head>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(90px,1fr))",gap:10,marginBottom:14}}>
+              {[["kcal","kcal"],["protein","protein g"],["fiber","fiber g"],["fat","fat g"],["carbs","carbs g"]].map(([k,l])=>(
+                <div key={k}><div style={{fontSize:10.5,color:"#8C8478",marginBottom:3}}>{l}</div>
+                  <input className="cell num" type="number" value={target[k]} onChange={(e)=>setTarget(t=>({...t,[k]:+e.target.value}))}/></div>
+              ))}
+            </div>
+            {!actualMacro ? (
+              <p style={{fontSize:12.5,color:"#8C8478"}}>Run "✦ AI detect foods" above — it also estimates actual protein/fiber/fat/carbs to score against your target.</p>
+            ) : (
+              <>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(90px,1fr))",gap:10,marginBottom:12}}>
+                  {[["protein","protein g"],["fiber","fiber g"],["fat","fat g"],["carbs","carbs g"]].map(([k,l])=>(
+                    <div key={k}><div style={{fontSize:10.5,color:"#8C8478",marginBottom:3}}>Actual {l}</div>
+                      <input className="cell num" type="number" value={actualMacro[k]} onChange={(e)=>setActualMacro(m=>({...m,[k]:+e.target.value}))}/></div>
+                  ))}
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+                  <span style={{fontSize:11,color:"#8C8478",whiteSpace:"nowrap"}}>Food quality (AI)</span>
+                  <input type="range" min="0" max="10" step="1" value={actualMacro.quality} onChange={(e)=>setActualMacro(m=>({...m,quality:+e.target.value}))} style={{accentColor:TEAL,flex:1,maxWidth:240}}/>
+                  <span className="num" style={{fontSize:13,fontWeight:600}}>{actualMacro.quality}/10</span>
+                  <span style={{fontSize:11,color:"#9B9286"}}>{actualMacro.quality>=7?"whole foods":actualMacro.quality>=4?"refined/processed":"ultra-processed"}</span>
+                </div>
+                <div style={{display:"flex",gap:18,alignItems:"center",flexWrap:"wrap",background:INK,borderRadius:12,padding:"18px 20px"}}>
+                  <div style={{fontFamily:"Fraunces, serif",fontSize:46,fontWeight:600,color:scoreColor,lineHeight:1}}>{score.total}<span style={{fontSize:18,color:"#9B9286"}}>/10</span></div>
+                  <div style={{flex:1,minWidth:180}}>
+                    {[["Calorie fit",score.calScore,2],["Protein",score.proteinScore,2],["Fiber",score.fiberScore,2],["Quality",score.qScore,3],["Fat band",score.fatScore,1]].map(([l,v,mx])=>(
+                      <div key={l} style={{marginBottom:5}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#B9B0A2"}}><span>{l}</span><span className="num">{v.toFixed(1)}/{mx}</span></div>
+                        <div style={{height:5,background:"rgba(255,255,255,.12)",borderRadius:3}}><div style={{width:`${(v/mx)*100}%`,height:"100%",background:MUSTARD,borderRadius:3}}/></div>
+                      </div>
+                    ))}
+                  </div>
+                  <button className="btn" onClick={()=>{onLogScore&&onLogScore({foodScore:score.total});setLogged(true);}} style={{background:logged?"#3A4A45":TEAL,color:"#fff",alignSelf:"flex-start"}}>{logged?"✓ Logged today":"📌 Log to Progress"}</button>
+                </div>
+                {score.capped && <div style={{fontSize:12,color:TERRA,margin:"8px 0 0",fontWeight:600}}>⚠ Over 175% of calorie target — score capped at 2 (blowout guard).</div>}
+                <p style={{fontSize:11.5,color:"#9B9286",margin:"10px 0 0"}}>Weights: 2 calories · 2 protein · 2 fiber · 3 quality · 1 fat. Macros are scored by <b>density</b> (grams per 100 kcal) so a big portion of the wrong food can't inflate them. Undereating up to 30% under target isn't penalized (a light meal is a choice); overeating is. Quality is the AI's whole-food judgment of the full plate — adjustable above.</p>
+              </>
+            )}
+          </Card>)}
       </>}
     </>
   );
@@ -644,6 +756,102 @@ function GroceryPlan() {
       </Card>
 
       <p style={{ fontSize: 12, color: "#9B9286", margin: "14px 4px 0" }}>Structured as {"{ day, mealType, items[], kcal }"} across 14 days — same shape the Plate Lab uses, so days here can feed the calorie log once we wire import/export.</p>
+    </>
+  );
+}
+
+/* ============ TAB 4: progress ============ */
+const SCALES = ["Day", "Week", "Month", "Year"];
+function bucketLog(log, scale) {
+  const sorted = [...log].sort((a, b) => a.date.localeCompare(b.date));
+  if (scale === "Day") return sorted.map((e) => ({ label: e.date.slice(5), fullLabel: e.date, weightLbs: e.weightLbs, foodScore: e.foodScore, events: e.events, n: 1 }));
+  const keyFor = (d) => {
+    if (scale === "Week") { const dt = new Date(d); const onejan = new Date(dt.getFullYear(), 0, 1); const wk = Math.ceil((((dt - onejan) / 86400000) + onejan.getDay() + 1) / 7); return `${dt.getFullYear()}-W${wk}`; }
+    if (scale === "Month") return d.slice(0, 7);
+    return d.slice(0, 4);
+  };
+  const groups = {};
+  sorted.forEach((e) => { const k = keyFor(e.date); (groups[k] ||= []).push(e); });
+  return Object.entries(groups).map(([k, arr]) => {
+    const w = arr.filter((e) => e.weightLbs != null);
+    const s = arr.filter((e) => e.foodScore != null);
+    const events = arr.map((e) => e.events).filter(Boolean).join(" · ");
+    return { label: k.replace(/^\d{4}-/, ""), fullLabel: `${k} (${arr.length}d)`, weightLbs: w.length ? Math.round((w.reduce((s2, e) => s2 + e.weightLbs, 0) / w.length) * 10) / 10 : null, foodScore: s.length ? Math.round((s.reduce((s2, e) => s2 + e.foodScore, 0) / s.length) * 10) / 10 : null, events, n: arr.length };
+  });
+}
+function ProgressTab({ log, onLog }) {
+  const [scale, setScale] = useState("Day");
+  const [hover, setHover] = useState(null);
+  const [form, setForm] = useState({ date: todayISO(), weightLbs: "", foodScore: "", events: "" });
+  const data = bucketLog(log, scale);
+  const shown = data.length > 60 ? data.slice(-60) : data;
+  const point = hover != null ? shown[hover] : shown[shown.length - 1];
+  const tickGap = Math.max(1, Math.ceil(shown.length / 12));
+  const firstW = shown.find((d) => d.weightLbs != null)?.weightLbs, lastW = [...shown].reverse().find((d) => d.weightLbs != null)?.weightLbs;
+  const delta = firstW != null && lastW != null ? Math.round((lastW - firstW) * 10) / 10 : null;
+
+  const submit = () => { if (!form.date) return;
+    const patch = { date: form.date, events: form.events };
+    if (form.weightLbs !== "") patch.weightLbs = +form.weightLbs;
+    if (form.foodScore !== "") patch.foodScore = +form.foodScore;
+    onLog(patch); setForm({ date: todayISO(), weightLbs: "", foodScore: "", events: "" }); };
+
+  return (
+    <>
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 6 }}>
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 600 }}>Weight & food score trend</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {SCALES.map((s) => <button key={s} className="btn" onClick={() => { setScale(s); setHover(null); }} style={{ background: scale === s ? TEAL : "#fff", color: scale === s ? "#fff" : INK, border: `1px solid ${scale === s ? TEAL : LINE}`, padding: "6px 12px", fontSize: 13 }}>{s}</button>)}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 20, marginBottom: 10 }}>
+          <Readout label="Current" value={lastW != null ? `${lastW} lbs` : "—"} />
+          <Readout label={`Change (${scale.toLowerCase()}s shown)`} value={delta != null ? `${delta > 0 ? "+" : ""}${delta} lbs` : "—"} />
+        </div>
+
+        <div style={{ height: 260 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={shown} margin={{ left: -10, right: 10, top: 6 }}
+              onMouseMove={(s) => { if (s && s.activeTooltipIndex != null) setHover(s.activeTooltipIndex); }}
+              onMouseLeave={() => setHover(null)}>
+              <CartesianGrid strokeDasharray="3 5" stroke="#EDE6DA" />
+              <XAxis dataKey="label" interval={tickGap - 1} tick={{ fill: "#8C8478", fontSize: 11 }} stroke="#D8CFC0" />
+              <YAxis yAxisId="w" domain={["auto", "auto"]} tick={{ fill: "#8C8478", fontSize: 11 }} stroke="#D8CFC0" width={44} />
+              <YAxis yAxisId="s" orientation="right" domain={[0, 10]} tick={{ fill: "#8C8478", fontSize: 11 }} stroke="#D8CFC0" width={28} />
+              <Bar yAxisId="s" dataKey="foodScore" barSize={scale === "Day" ? 6 : 14} radius={[3, 3, 0, 0]}>
+                {shown.map((d, i) => <Cell key={i} fill={d.foodScore == null ? "transparent" : d.foodScore >= 8 ? TEAL : d.foodScore >= 5 ? MUSTARD : TERRA} fillOpacity={0.55} />)}
+              </Bar>
+              <Line yAxisId="w" type="monotone" dataKey="weightLbs" stroke={INK} strokeWidth={2.5} dot={{ r: shown.length > 40 ? 0 : 3, fill: INK }} connectNulls />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* hover / selected detail panel — below the chart, per spec */}
+        {point && (
+          <div className="fade" style={{ marginTop: 8, background: CARD, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 16px" }}>
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "baseline" }}>
+              <span style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 12, color: "#8C8478" }}>{point.fullLabel}</span>
+              <span><span style={{ fontSize: 11, color: "#8C8478" }}>Weight </span><span className="num" style={{ fontWeight: 600 }}>{point.weightLbs != null ? `${point.weightLbs} lbs` : "—"}</span></span>
+              <span><span style={{ fontSize: 11, color: "#8C8478" }}>Food score </span><span className="num" style={{ fontWeight: 600, color: point.foodScore == null ? INK : point.foodScore >= 8 ? TEAL : point.foodScore >= 5 ? MUSTARD : TERRA }}>{point.foodScore != null ? `${point.foodScore}/10` : "—"}</span></span>
+            </div>
+            {point.events && <div style={{ fontSize: 12.5, color: "#4A4239", marginTop: 6 }}>📌 {point.events}</div>}
+          </div>
+        )}
+        <p style={{ fontSize: 11.5, color: "#9B9286", margin: "10px 0 0" }}>Hover any point for details · bars = food score (color-coded) · line = weight · {scale !== "Day" ? "values are period averages" : "raw daily entries"}.</p>
+      </Card>
+
+      <Card>
+        <Head n={1} done={false}>Add / update an entry</Head>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 2fr auto", gap: 10, alignItems: "flex-end" }}>
+          <Field label="Date"><input className="cell" type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} /></Field>
+          <Field label="Weight (lbs)"><input className="cell num" type="number" placeholder="optional" value={form.weightLbs} onChange={(e) => setForm((f) => ({ ...f, weightLbs: e.target.value }))} /></Field>
+          <Field label="Food score (1-10)"><input className="cell num" type="number" min="1" max="10" placeholder="optional" value={form.foodScore} onChange={(e) => setForm((f) => ({ ...f, foodScore: e.target.value }))} /></Field>
+          <Field label="Events / notes"><input className="cell" placeholder="e.g. travel day, bike ride" value={form.events} onChange={(e) => setForm((f) => ({ ...f, events: e.target.value }))} /></Field>
+          <button className="btn" onClick={submit} style={{ background: INK, color: PAPER }}>Save</button>
+        </div>
+        <p style={{ fontSize: 11.5, color: "#9B9286", margin: "10px 0 0" }}>Food scores from Plate Lab log here automatically when you tap "📌 Log to Progress" — this form is for weight entries and any day you want to add manually.</p>
+      </Card>
     </>
   );
 }
